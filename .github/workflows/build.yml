@@ -1,0 +1,65 @@
+name: Build Lingua Open
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.x'
+
+      - name: Prepare platform files
+        run: python scripts/prepare_platforms.py
+
+      - run: flutter pub get
+      - run: flutter test test/translation_test.dart
+      - run: flutter build windows --release
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: lingua-open-windows
+          path: build/windows/x64/runner/Release/
+          if-no-files-found: error
+
+  android:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.x'
+
+      - name: Prepare platform files
+        run: python scripts/prepare_platforms.py
+
+      - run: flutter pub get
+      - run: flutter test test/translation_test.dart
+      - run: flutter build apk --release
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: lingua-open-android-apk
+          path: build/app/outputs/flutter-apk/app-release.apk
+          if-no-files-found: error
