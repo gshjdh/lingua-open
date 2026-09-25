@@ -30,10 +30,11 @@ class _TranslatorPageState extends State<TranslatorPage> {
   final _text = TextEditingController();
   final _client = http.Client();
   SharedPreferences? _prefs;
-  LibreTranslateEngine? _engine;
+  TranslationEngine? _engine;
   List<Language> _languages = [];
   List<Map<String, dynamic>> _history = [];
-  String _endpoint = '', _key = '', _source = 'auto', _target = '';
+  String _endpoint = '', _key = '', _provider = 'libre', _source = 'auto', _target = '';
+  String _tencentId = '', _tencentKey = '';
   String _result = '', _error = '';
   bool _ready = false, _busy = false, _remember = false;
 
@@ -48,6 +49,7 @@ class _TranslatorPageState extends State<TranslatorPage> {
       setState(() {
         _prefs = prefs;
         _endpoint = prefs.getString('endpoint') ?? '';
+        _provider = prefs.getString('provider') ?? 'libre';
         _remember = prefs.getBool('remember') ?? false;
         if (records is List) {
           _history = records.whereType<Map>().where((e) =>
@@ -70,7 +72,10 @@ class _TranslatorPageState extends State<TranslatorPage> {
 
   Future<void> _settings() async {
     final address = TextEditingController(text: _endpoint);
-    final secret = TextEditingController(text: _key);
+    final libreKey = TextEditingController(text: _key);
+    final tencentId = TextEditingController(text: _tencentId);
+    final tencentKey = TextEditingController(text: _tencentKey);
+    var provider = _provider;
     String? validation;
     final accepted = await showDialog<bool>(context: context, builder: (context) =>
       StatefulBuilder(builder: (context, update) => AlertDialog(
@@ -78,49 +83,72 @@ class _TranslatorPageState extends State<TranslatorPage> {
         content: SizedBox(width: 440, child: SingleChildScrollView(child: Column(
           mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            const Text('接入你选择的 LibreTranslate 服务。点击连接会读取语言列表；点击翻译会将原文发送至该服务。'),
+            DropdownButtonFormField<String>(value: provider, decoration: const InputDecoration(
+              labelText: '翻译引擎', border: OutlineInputBorder()), items: const [
+                DropdownMenuItem(value: 'tencent', child: Text('腾讯云机器翻译（推荐）')),
+                DropdownMenuItem(value: 'libre', child: Text('LibreTranslate')),
+              ], onChanged: (v) { if (v != null) update(() { provider = v; validation = null; }); }),
             const SizedBox(height: 16),
-            TextField(controller: address, decoration: InputDecoration(
-              labelText: 'HTTPS 服务根地址', hintText: 'https://translate.example.com',
-              errorText: validation)),
+            if (provider == 'tencent') ...[
+              const Text('腾讯云每月提供免费字符额度。请在腾讯云控制台创建 SecretId 和 SecretKey，并关闭后付费。'),
+              const SizedBox(height: 12),
+              TextField(controller: tencentId, autocorrect: false, enableSuggestions: false,
+                decoration: const InputDecoration(labelText: 'SecretId')),
+              const SizedBox(height: 12),
+              TextField(controller: tencentKey, obscureText: true, autocorrect: false,
+                enableSuggestions: false, decoration: const InputDecoration(labelText: 'SecretKey')),
+            ] else ...[
+              const Text('接入 LibreTranslate 兼容服务。公共镜像可能限流或超时。'),
+              const SizedBox(height: 12),
+              TextField(controller: address, decoration: InputDecoration(
+                labelText: 'HTTPS 服务根地址', hintText: 'https://translate.example.com', errorText: validation)),
+              const SizedBox(height: 12),
+              TextField(controller: libreKey, obscureText: true, autocorrect: false,
+                enableSuggestions: false, decoration: const InputDecoration(labelText: 'API 密钥（可选）')),
+            ],
             const SizedBox(height: 12),
-            TextField(controller: secret, obscureText: true, autocorrect: false,
-              enableSuggestions: false, decoration: const InputDecoration(
-                labelText: 'API 密钥（服务需要时填写）')),
-            const SizedBox(height: 12),
-            const Text('密钥仅保留在当前会话，重启后需重新填写。服务可能收费。'),
+            const Text('密钥仅保留在当前会话，不会写入本地历史记录。'),
           ],
         ))),
         actions: [
           TextButton(onPressed: () => Navigator.pop(context, false), child: const Text('取消')),
           FilledButton(onPressed: () {
-            try { LibreTranslateEngine.validateEndpoint(address.text); }
-            catch (e) { update(() => validation = e.toString()); return; }
+            if (provider == 'tencent') {
+              if (tencentId.text.trim().isEmpty || tencentKey.text.trim().isEmpty) {
+                update(() => validation = '请填写 SecretId 和 SecretKey。'); return;
+              }
+            } else {
+              try { LibreTranslateEngine.validateEndpoint(address.text); }
+              catch (e) { update(() => validation = e.toString()); return; }
+            }
             Navigator.pop(context, true);
           }, child: const Text('连接')),
         ],
       )),
     );
-    final endpoint = address.text.trim(), key = secret.text.trim();
-    // Controllers are disposed after the dialog's closing transition.
-    Future<void>.delayed(const Duration(seconds: 1), () { address.dispose(); secret.dispose(); });
+    final endpoint = address.text.trim(), key = libreKey.text.trim();
+    final id = tencentId.text.trim(), tkey = tencentKey.text.trim();
+    Future<void>.delayed(const Duration(seconds: 1), () { address.dispose(); libreKey.dispose(); tencentId.dispose(); tencentKey.dispose(); });
     if (accepted != true || !mounted) return;
     setState(() { _busy = true; _error = ''; });
     try {
-      final engine = LibreTranslateEngine(_client, endpoint, apiKey: key);
+      final TranslationEngine engine;
+      if (provider == 'tencent') {
+        engine = TencentCloudEngine(_client, secretId: id, secretKey: tkey);
+      } else {
+        engine = LibreTranslateEngine(_client, endpoint, apiKey: key);
+      }
       final languages = await engine.languages();
       if (!mounted) return;
       setState(() {
-        _engine = engine; _endpoint = endpoint; _key = key; _languages = languages;
-        _source = 'auto';
-        _target = languages.any((l) => l.code == 'zh') ? 'zh' : languages.first.code;
-        _result = '';
+        _engine = engine; _provider = provider; _endpoint = provider == 'tencent' ? '腾讯云机器翻译' : endpoint;
+        _key = key; _tencentId = id; _tencentKey = tkey; _languages = languages;
+        _source = 'auto'; _target = languages.any((l) => l.code == 'zh') ? 'zh' : languages.first.code; _result = '';
       });
       try {
-        if (_prefs != null && !await _prefs!.setString('endpoint', endpoint)) {
-          throw StateError('write failed');
-        }
-      } catch (_) { if (mounted) setState(() => _error = '已连接，但服务地址未能保存。'); }
+        if (_prefs == null || !await _prefs!.setString('provider', provider)) throw StateError('write failed');
+        if (provider == 'libre' && !await _prefs!.setString('endpoint', endpoint)) throw StateError('write failed');
+      } catch (_) { if (mounted) setState(() => _error = '已连接，但服务设置未能保存。'); }
     } catch (e) { _fail(e); }
     finally { if (mounted) setState(() => _busy = false); }
   }
